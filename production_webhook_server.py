@@ -184,15 +184,35 @@ def process_form_submission(webhook_data):
 def extract_form_data(webhook_data):
     """Extract relevant data from FastField webhook"""
     try:
-        # Parse submission date
+        # Parse submission date from FastField (Accepted Date)
+        # Use updatedAt as the actual submission date/time
         submission_date_str = webhook_data.get('updatedAt', '')
         if submission_date_str:
-            submission_date = datetime.fromisoformat(submission_date_str.replace('Z', '+00:00'))
+            # Handle different date formats from FastField
+            try:
+                # Try parsing with timezone info (e.g., "2025-08-06T13:44:12-04:00")
+                submission_date = datetime.fromisoformat(submission_date_str.replace('Z', '+00:00'))
+            except:
+                try:
+                    # Try parsing without timezone
+                    submission_date = datetime.fromisoformat(submission_date_str)
+                except:
+                    # Fallback to current time
+                    submission_date = datetime.now()
         else:
             submission_date = datetime.now()
         
+        # Calculate due date (Accepted Date + 5 days)
+        due_date = submission_date + timedelta(days=5)
+        
         # DEBUG: Log all available fields
         logger.info(f"🔍 Available fields in webhook: {list(webhook_data.keys())}")
+        logger.info(f"📅 Accepted Date (from updatedAt): {submission_date.strftime('%Y-%m-%d %H:%M')}")
+        logger.info(f"📅 Due Date (Accepted + 5 days): {due_date.strftime('%Y-%m-%d')}")
+        
+        # Also check for other date fields that might be relevant
+        if webhook_data.get('datepicker_1'):
+            logger.info(f"📅 Form date field (datepicker_1): {webhook_data['datepicker_1']}")
         
         # Extract form data based on FastField field names
         # Handle both array and single value formats
@@ -224,7 +244,7 @@ def extract_form_data(webhook_data):
             'overall_comments': overall_comments,  # Task Description
             'job_owner': job_owner,
             'submission_date': submission_date,
-            'due_date': submission_date + timedelta(days=5),
+            'due_date': due_date,
             'images': []
         }
         
@@ -248,7 +268,7 @@ def extract_form_data(webhook_data):
         logger.info(f"   Job Number: {form_data['job_number']}")
         logger.info(f"   Job Owner: {form_data['job_owner']}")
         logger.info(f"   Comments: {len(form_data['overall_comments'])} chars")
-        logger.info(f"   Due Date: {form_data['due_date']}")
+        logger.info(f"   Due Date: {form_data['due_date'].strftime('%Y-%m-%d')}")
         
         return form_data
         
@@ -266,21 +286,39 @@ def create_asana_task(form_data):
         
         # Map form data to Asana task fields
         task_name = form_data.get('address', 'Unknown Address')  # Address as Task Name
-        notes = ""  # Notes empty as requested
         job_owner = form_data.get('job_owner', '')
         job_number = form_data.get('job_number', '')
         
-        # Format due date properly for Asana
-        due_date = form_data['due_date'].strftime('%Y-%m-%d')
+        # Format due date properly for Asana (YYYY-MM-DD format)
+        due_date_str = form_data['due_date'].strftime('%Y-%m-%d')
+        
+        # Set description to overall comments (not notes)
+        description = form_data.get('overall_comments', '')
+        
+        # Notes should be empty as requested
+        notes = ""
         
         task_data = {
             'data': {
                 'name': task_name,
                 'notes': notes,
                 'projects': [PROJECT_ID],
-                'due_date': due_date
+                'due_date': due_date_str
             }
         }
+        
+        # Add description separately if we have overall comments
+        if description:
+            task_data['data']['html_notes'] = f"<body>{description}</body>"
+            logger.info(f"📋 Description set: {description}")
+        else:
+            logger.info(f"📋 No description (no overall comments)")
+        
+        logger.info(f"📋 Task data being sent to Asana:")
+        logger.info(f"   Name: {task_name}")
+        logger.info(f"   Notes: {notes}")
+        logger.info(f"   Description: {description}")
+        logger.info(f"   Due Date: {due_date_str}")
         
         # Add assignee if we have job owner info
         if job_owner:
@@ -289,7 +327,7 @@ def create_asana_task(form_data):
             logger.info(f"📋 Job Owner: {job_owner} (assignee not set)")
         
         logger.info(f"📝 Creating Asana task: {task_name}")
-        logger.info(f"📅 Due Date: {due_date}")
+        logger.info(f"📅 Due Date: {due_date_str}")
         logger.info(f"📋 Job Number: {job_number}")
         
         response = requests.post(
