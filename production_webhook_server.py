@@ -168,6 +168,12 @@ def process_form_submission(webhook_data):
             if upload_result['success']:
                 logger.info(f"📸 Uploaded {len(form_data['images'])} images to task")
         
+        # Create subtasks for Location data if any
+        if form_data.get('location_comments'):
+            subtask_result = create_location_subtasks(task_id, form_data['location_comments'])
+            if subtask_result['success']:
+                logger.info(f"📋 Created {len(form_data['location_comments'])} location subtasks")
+        
         return {
             'success': True,
             'message': f'Task created successfully: {task_id}',
@@ -236,12 +242,21 @@ def extract_form_data(webhook_data):
         elif webhook_data.get('multiline_34'):
             overall_comments = webhook_data['multiline_34']
         
+        # Extract location comments (for subtasks)
+        location_comments = []
+        # Look for location-related fields in the webhook data
+        location_fields = ['multiline_2', 'multiline_4', 'multiline_5']  # Add more as needed
+        for field in location_fields:
+            if webhook_data.get(field):
+                location_comments.append(webhook_data[field])
+        
         form_data = {
             'submission_id': webhook_data.get('submissionId', ''),
             'form_name': webhook_data.get('formName', ''),
             'address': webhook_data.get('alpha_2', 'Unknown Address'),  # Task Name
             'job_number': job_number,
             'overall_comments': overall_comments,  # Task Description
+            'location_comments': location_comments,  # For subtasks
             'job_owner': job_owner,
             'submission_date': submission_date,
             'due_date': due_date,
@@ -292,6 +307,11 @@ def create_asana_task(form_data):
         # Format due date properly for Asana (YYYY-MM-DD format)
         due_date_str = form_data['due_date'].strftime('%Y-%m-%d')
         
+        # Ensure due date is not None and is valid
+        if not due_date_str or due_date_str == 'None':
+            logger.error(f"❌ Invalid due date: {form_data['due_date']}")
+            due_date_str = None
+        
         # Set description to overall comments (not notes)
         description = form_data.get('overall_comments', '')
         
@@ -302,10 +322,13 @@ def create_asana_task(form_data):
             'data': {
                 'name': task_name,
                 'notes': notes,
-                'projects': [PROJECT_ID],
-                'due_date': due_date_str
+                'projects': [PROJECT_ID]
             }
         }
+        
+        # Only add due_date if it's valid
+        if due_date_str:
+            task_data['data']['due_date'] = due_date_str
         
         # Add description separately if we have overall comments
         if description:
@@ -341,7 +364,7 @@ def create_asana_task(form_data):
             logger.info(f"✅ Task created successfully: {task_id}")
             
             # Update custom fields if we have the data
-            if job_number:
+            if job_number or form_data.get('submission_date'):
                 update_custom_fields(task_id, job_number, form_data)
             
             return {
@@ -382,6 +405,9 @@ def update_custom_fields(task_id, job_number, form_data):
             task_data = response.json()['data']
             custom_fields = task_data.get('custom_fields', [])
             
+            # Prepare custom field updates
+            field_updates = {}
+            
             # Find the custom field for Job Number
             job_number_field_id = None
             for field in custom_fields:
@@ -389,13 +415,27 @@ def update_custom_fields(task_id, job_number, form_data):
                     job_number_field_id = field.get('gid')
                     break
             
-            if job_number_field_id:
-                # Update the Job Number field
+            if job_number_field_id and job_number:
+                field_updates[job_number_field_id] = job_number
+                logger.info(f"📋 Job Number field found: {job_number}")
+            
+            # Find the custom field for Received Date (Accepted Date)
+            received_date_field_id = None
+            for field in custom_fields:
+                if field.get('name') == 'Received Date':
+                    received_date_field_id = field.get('gid')
+                    break
+            
+            if received_date_field_id and form_data.get('submission_date'):
+                accepted_date_str = form_data['submission_date'].strftime('%Y-%m-%d')
+                field_updates[received_date_field_id] = accepted_date_str
+                logger.info(f"📅 Accepted Date field found: {accepted_date_str}")
+            
+            # Update all custom fields at once
+            if field_updates:
                 update_data = {
                     'data': {
-                        'custom_fields': {
-                            job_number_field_id: job_number
-                        }
+                        'custom_fields': field_updates
                     }
                 }
                 
@@ -406,14 +446,60 @@ def update_custom_fields(task_id, job_number, form_data):
                 )
                 
                 if update_response.status_code == 200:
-                    logger.info(f"✅ Updated Job Number field: {job_number}")
+                    logger.info(f"✅ Updated custom fields successfully")
                 else:
-                    logger.error(f"❌ Failed to update Job Number field: {update_response.status_code}")
+                    logger.error(f"❌ Failed to update custom fields: {update_response.status_code}")
             else:
-                logger.warning("⚠️ Job Number custom field not found")
+                logger.warning("⚠️ No custom fields to update")
         
     except Exception as e:
         logger.error(f"❌ Error updating custom fields: {str(e)}")
+
+def create_location_subtasks(task_id, location_comments):
+    """Create subtasks for location comments"""
+    try:
+        headers = {
+            'Authorization': f'Bearer {ASANA_PAT}',
+            'Content-Type': 'application/json'
+        }
+        
+        created_subtasks = []
+        
+        for i, comment in enumerate(location_comments):
+            if comment and comment.strip():
+                subtask_data = {
+                    'data': {
+                        'name': f'Location Failure {i+1}',
+                        'notes': comment,
+                        'parent': task_id
+                    }
+                }
+                
+                response = requests.post(
+                    'https://app.asana.com/api/1.0/tasks',
+                    headers=headers,
+                    json=subtask_data
+                )
+                
+                if response.status_code == 201:
+                    subtask_id = response.json()['data']['gid']
+                    created_subtasks.append(subtask_id)
+                    logger.info(f"✅ Created subtask {i+1}: {subtask_id}")
+                else:
+                    logger.error(f"❌ Failed to create subtask {i+1}: {response.status_code}")
+        
+        return {
+            'success': True,
+            'message': f'Created {len(created_subtasks)} subtasks',
+            'subtask_ids': created_subtasks
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error creating location subtasks: {str(e)}")
+        return {
+            'success': False,
+            'message': f'Error creating subtasks: {str(e)}'
+        }
 
 def upload_images_to_task(task_id, images):
     """Upload images to Asana task (placeholder for now)"""
