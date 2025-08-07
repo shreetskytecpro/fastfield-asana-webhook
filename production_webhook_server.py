@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 SIMPLE FastField to Asana Webhook Server
-Focus on basics: Name, Description, Due Date, Job Number
+Focus on basics: Name, Description, Due Date, Job Number, Accepted Date, Assignee
 """
 
 import requests
@@ -163,6 +163,13 @@ def extract_form_data(webhook_data):
             else:
                 job_number = webhook_data['lookuplistpicker_1']
         
+        job_owner = ''
+        if webhook_data.get('lookuplistpicker_2'):
+            if isinstance(webhook_data['lookuplistpicker_2'], list):
+                job_owner = webhook_data['lookuplistpicker_2'][0] if webhook_data['lookuplistpicker_2'] else ''
+            else:
+                job_owner = webhook_data['lookuplistpicker_2']
+        
         overall_comments = ''
         if webhook_data.get('multiline_3'):
             overall_comments = webhook_data['multiline_3']
@@ -172,16 +179,20 @@ def extract_form_data(webhook_data):
         form_data = {
             'address': webhook_data.get('alpha_2', 'Unknown Address'),
             'job_number': job_number,
+            'job_owner': job_owner,
             'overall_comments': overall_comments,
+            'submission_date': submission_date,
             'due_date': due_date
         }
         
         # DEBUG: Log extracted data
-        logger.info(f"�� Extracted data:")
+        logger.info(f" Extracted data:")
         logger.info(f"   Address: {form_data['address']}")
         logger.info(f"   Job Number: {form_data['job_number']}")
+        logger.info(f"   Job Owner: {form_data['job_owner']}")
         logger.info(f"   Comments: {len(form_data['overall_comments'])} chars")
-        logger.info(f"   Due Date: {form_data['due_date'].strftime('%Y-%m-%d')}")
+        logger.info(f"   Submission Date: {form_data['submission_date'].strftime('%m/%d/%Y')}")
+        logger.info(f"   Due Date: {form_data['due_date'].strftime('%m/%d/%Y')}")
         
         return form_data
         
@@ -197,8 +208,8 @@ def create_asana_task(form_data):
             'Content-Type': 'application/json'
         }
         
-        # Format due date
-        due_date_str = form_data['due_date'].strftime('%Y-%m-%d')
+        # Format due date as MM/DD/YYYY for Asana
+        due_date_str = form_data['due_date'].strftime('%m/%d/%Y')
         
         # Create task with basic fields
         task_data = {
@@ -214,6 +225,7 @@ def create_asana_task(form_data):
         logger.info(f"   Name: {form_data['address']}")
         logger.info(f"   Notes: {form_data['overall_comments']}")
         logger.info(f"   Due Date: {due_date_str}")
+        logger.info(f"   Job Owner: {form_data['job_owner']}")
         
         response = requests.post(
             'https://app.asana.com/api/1.0/tasks',
@@ -225,9 +237,9 @@ def create_asana_task(form_data):
             task_id = response.json()['data']['gid']
             logger.info(f"✅ Task created successfully: {task_id}")
             
-            # Update Job Number as a simple custom field
-            if form_data['job_number']:
-                update_job_number_field(task_id, form_data['job_number'])
+            # Update custom fields
+            if form_data['job_number'] or form_data['submission_date']:
+                update_custom_fields(task_id, form_data)
             
             return {
                 'success': True,
@@ -248,8 +260,8 @@ def create_asana_task(form_data):
             'message': f'Error creating task: {str(e)}'
         }
 
-def update_job_number_field(task_id, job_number):
-    """Update Job Number field - SIMPLE VERSION"""
+def update_custom_fields(task_id, form_data):
+    """Update custom fields in Asana task - SIMPLE VERSION"""
     try:
         headers = {
             'Authorization': f'Bearer {ASANA_PAT}',
@@ -267,6 +279,9 @@ def update_job_number_field(task_id, job_number):
             task_data = response.json()['data']
             custom_fields = task_data.get('custom_fields', [])
             
+            # Prepare custom field updates
+            field_updates = {}
+            
             # Find the Job Number field
             job_number_field_id = None
             for field in custom_fields:
@@ -274,13 +289,27 @@ def update_job_number_field(task_id, job_number):
                     job_number_field_id = field.get('gid')
                     break
             
-            if job_number_field_id:
-                # Update the Job Number field
+            if job_number_field_id and form_data['job_number']:
+                field_updates[job_number_field_id] = form_data['job_number']
+                logger.info(f"📋 Job Number field found: {form_data['job_number']}")
+            
+            # Find the Received Date field (Accepted Date)
+            received_date_field_id = None
+            for field in custom_fields:
+                if field.get('name') == 'Received Date':
+                    received_date_field_id = field.get('gid')
+                    break
+            
+            if received_date_field_id and form_data.get('submission_date'):
+                accepted_date_str = form_data['submission_date'].strftime('%m/%d/%Y')
+                field_updates[received_date_field_id] = accepted_date_str
+                logger.info(f"📅 Accepted Date field found: {accepted_date_str}")
+            
+            # Update all custom fields at once
+            if field_updates:
                 update_data = {
                     'data': {
-                        'custom_fields': {
-                            job_number_field_id: job_number
-                        }
+                        'custom_fields': field_updates
                     }
                 }
                 
@@ -291,14 +320,14 @@ def update_job_number_field(task_id, job_number):
                 )
                 
                 if update_response.status_code == 200:
-                    logger.info(f"✅ Updated Job Number field: {job_number}")
+                    logger.info(f"✅ Updated custom fields successfully")
                 else:
-                    logger.error(f"❌ Failed to update Job Number field: {update_response.status_code}")
+                    logger.error(f"❌ Failed to update custom fields: {update_response.status_code}")
             else:
-                logger.warning("⚠️ Job Number custom field not found")
+                logger.warning("⚠️ No custom fields to update")
         
     except Exception as e:
-        logger.error(f"❌ Error updating Job Number field: {str(e)}")
+        logger.error(f"❌ Error updating custom fields: {str(e)}")
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000, debug=False)
